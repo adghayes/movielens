@@ -1,48 +1,47 @@
-apply_prediction <- function(f, newdata){
-  actual <- newdata$rating
-  predicted <- f(newdata)
-  RMSE(actual,predicted)
+################################
+# Model Data + Calculate RMSEs #
+################################
+load("./data/movielens.rda")
+
+
+### SIMPLE AVERAGE APPROACH (c) ###
+
+mu <- edx %>% pull(rating) %>% mean()
+
+c_predict <- function(newdata){
+  rep(mu, nrow(newdata))
 }
 
-# SIMPLE AVERAGE APPROACH (constant)
-mu_all <- edx %>% pull(rating) %>% mean()
+c_prediction <- c_predict(validation)
+c_RMSE <- RMSE(validation$rating, c_prediction)
 
-constant_predict <- function(newdata){
-  newdata %>% mutate(rating = c(mu_all)) %>% pull(rating)
-}
+### MOVIE + USER EFFECTS APPROACH (muf) ###
+movie_effects <- edx %>% 
+  group_by(movieId) %>%
+  summarize(m_i = mean(rating - mu), n_i = n())
 
-apply_prediction(constant_predict, edx)
-apply_prediction(constant_predict, validation)
+user_effects <- edx %>% 
+  left_join(movie_effects, by = "movieId") %>%
+  group_by(userId) %>%
+  summarize(u_j = mean(rating - mu - m_i), n_j = n())
 
-# MOVIE AVERAGE APPROACH (m)
-m_i <- edx %>% group_by(movieId) %>%
-  summarize(m_i = mean(rating) - mu_all)
-
-m_predict <- function(newdata){
-  newdata %>% left_join(m_i, by = "movieId") %>%
-    mutate(rating = m_i + mu_all) %>%
+muf_predict <- function(newdata){
+  newdata %>% 
+    left_join(movie_effects, by = "movieId") %>%
+    left_join(user_effects, by = "userId") %>%
+    mutate(rating = mu + m_i + u_j) %>%
     pull(rating)
 }
 
-apply_prediction(m_predict, edx)
-apply_prediction(m_predict, validation)
+### MOVIE + USER EFFECTS w/ REGULARIZATION APPROACH (mufr) ###
 
-m_prediction <- m_predict(validation)
-validation %>% bind_cols(prediction = m_prediction) %>%
-  group_by(movieId,title,genres) %>%
-  summarize(rmse = RMSE(prediction, rating), numRating = n()) %>%
-  arrange(desc(rmse)) %>%
-  ggplot(aes(x = rmse, y = numRating)) + geom_point()
-
-ggsave("figs/unregularized_m_model.png")
-
-# MOVIE AVERAGE w/ REGULARIZATION (mr)
-# To determine a lambda we will need to use cross-validation on the training
+# To determine a lambda, we will need to use cross-validation on the training
 # set, so need to do k-fold split.
-k <- 3
+k <- 2
 set.seed(23, sample.kind="Rounding")
 edx_folds <- createFolds(y = edx$rating, k = k)
 
+# CUSTOM CROSS VALIDATION
 # This function removes users and movies from each "test" fold that don't appear 
 # in the rest of the edx set. As done
 clean_edx_fold <- function(fold){
@@ -58,7 +57,7 @@ sapply(edx_folds, length) # pre-clean sizes
 edx_folds <- lapply(edx_folds, clean_edx_fold)
 sapply(edx_folds, length) # post-clean sizes
 
-
+# MOVIE AVERAGE w/ REGULARIZATION (mr)
 apply_mr <- function(train, test, lambda){
   mr_i <- train %>% group_by(movieId) %>%
     summarize(
@@ -78,20 +77,78 @@ apply_mr_folds <- function(lambda){
   }))
 }
 
-lambda <- optim(par = 5, fn = apply_mr_folds, upper = 25, lower = .1, method = "L-BFGS-B")
+lambdas <- seq(2,2.3,.05)
+rmses <- sapply(lambdas, apply_mr_folds)
+plot(lambdas,rmses)
+lambda <- lambdas[which.min(rmses)]
 
-
-mov_r_predict <- function(newdata){
-  m_ir_temp <- edx %>% group_by(movieId) %>%
+mr_predict <- function(newdata){
+  mr_i <- edx %>% group_by(movieId) %>%
     summarize(
-      m_i = mean(rating) - mu_all,
+      mr_i = sum(rating- mu_all)/(n() + lambda),
       n_i = n()
-    ) %>%
-    mutate(m_i = n_i*m_i/(lambda_m + n_i))
+    )
   
-  newdata %>% select(movieId, userId) %>% 
-    left_join(m_ir_temp, by = "movieId") %>%
-    mutate(rating = m_i + mu_all)
+  newdata %>% left_join(mr_i, by = "movieId") %>%
+    mutate(rating = mr_i + mu_all) %>% pull(rating)
 }
 
-apply_prediction(mov_r_predict, validation)
+apply_prediction(mr_predict, validation)
+
+# MOVIE + USER AVERAGE w/ REGULARIZATION (mur)
+apply_mur <- function(train, test, lambda_m, lambda_u){
+  mr_i <- train %>% group_by(movieId) %>%
+    summarize(
+      mr_i = sum(rating- mu_all)/(n() + lambda_m),
+      n_i = n()
+    )
+  
+  ur_i <- train %>% left_join(mr_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(
+      ur_i = sum(rating - mu_all - mr_i)/(n() + lambda_u),
+      n_i = n()
+    )
+  
+  predicted <- test %>% 
+    left_join(mr_i, by = "movieId") %>%
+    left_join(ur_i, by = "userId") %>%
+    mutate(rating = mu_all + mr_i + ur_i) %>% pull(rating)
+  
+  RMSE(predicted, test$rating)
+}
+
+apply_mur_folds <- function(lambda_m, lambda_u){
+  mean(sapply(edx_folds, function(fold){
+    apply_mur(edx[-fold,],edx[fold,],lambda_m, lambda_u)
+  }))
+}
+
+lambda_m <- 4.05
+lambda_u <- 4.95
+rmses <- sapply(lambda_m, function(x){
+  apply_mur_folds(x, lambda_u)
+})
+plot(lambda_m, rmses)
+
+mur_predict <- function(newdata){
+  mr_i <- edx %>% group_by(movieId) %>%
+    summarize(
+      mr_i = sum(rating- mu_all)/(n() + lambda_m),
+      n_i = n()
+    )
+  
+  ur_i <- edx %>% left_join(mr_i, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(
+      ur_i = sum(rating - mu_all - mr_i)/(n() + lambda_u),
+      n_i = n()
+    )
+  
+  newdata %>% 
+    left_join(mr_i, by = "movieId") %>%
+    left_join(ur_i, by = "userId") %>%
+    mutate(rating = mu_all + mr_i + ur_i) %>% pull(rating)
+}
+
+apply_prediction(mur_predict, validation)

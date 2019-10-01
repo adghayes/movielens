@@ -12,13 +12,14 @@ if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.
 # https://grouplens.org/datasets/movielens/10m/
 # http://files.grouplens.org/datasets/movielens/ml-10m.zip
 
-dl <- tempfile()
-download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+# Moved to local copy to allow offline work, not using the below two lines:
+# dl <- tempfile()
+# download.file("files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
 
-ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+ratings <- fread(text = gsub("::", "\t", readLines("./data/ratings.dat")),
                  col.names = c("userId", "movieId", "rating", "timestamp"))
 
-movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+movies <- str_split_fixed(readLines("./data/movies.dat"), "\\::", 3)
 colnames(movies) <- c("movieId", "title", "genres")
 movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(levels(movieId))[movieId],
                                            title = as.character(title),
@@ -45,4 +46,5 @@ validation <- temp %>%
 removed <- anti_join(temp, validation)
 edx <- rbind(edx, removed)
 
-rm(dl, ratings, movies, test_index, temp, movielens, removed)
+rm(ratings, movies, test_index, temp, movielens, removed)
+save(edx, validation, file = "./data/movielens.rda")
