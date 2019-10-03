@@ -126,115 +126,66 @@ mufr_prediction <- mufr_predict(validation)
 mufr_RMSE <- RMSE(validation$rating, mufr_prediction)
 
 ###################
-# PCA             #
+# Recommender Lab #
 ###################
-pca_n_movies <- 50
-pca_lambda_movies <- 1000
-pca_n_users <- 10000
-pca_n_centers <- 27
-lambda_c <- 25
+# https://cran.r-project.org/web/packages/recommenderlab/vignettes/recommenderlab.pdf
 
-pca_movies <- edx %>% 
-  group_by(movieId) %>%
-  summarize(n = n(), sd = sd(rating), sdr = sd*n/(n + pca_lambda_movies)) %>%
-  top_n(pca_n_movies, wt = sdr) %>%
-  pull(movieId)
+library(recommenderlab)
+n_movies <- 500
+n_users <- 10000
 
-pca_users <- edx %>% 
-  filter(movieId %in% pca_movies) %>%
-  group_by(userId) %>%
-  tally() %>%
-  arrange(n) %>%
-  rowid_to_column() %>%
-  # top_n(pca_n_users, wt = rowid) %>%
-  pull(userId)
+movie_res <- edx %>% 
+  left_join(movie_effects_r, by = "movieId") %>%
+  left_join(user_effects_r, by = "userId") %>%
+  mutate(rating = rating - mu - m_i - u_j) %>%
+  group_by(movieId) %>% summarise(n = n(), sd = sd(rating)) %>%
+  mutate(wt = n*sd) %>% arrange(desc(wt))
+
+top_n_movies <- movie_res %>% top_n(n_movies, wt = wt) %>% pull(movieId)
+
+user_res <- edx %>% 
+  left_join(movie_effects_r, by = "movieId") %>%
+  left_join(user_effects_r, by = "userId") %>%
+  mutate(rating = rating - mu - m_i - u_j) %>%
+  filter(movieId %in% top_n_movies) %>%
+  group_by(userId) %>% summarise(n = n(), sd = sd(rating)) %>%
+  mutate(wt = n*sd) %>% arrange(desc(wt)) %>% 
+  select(userId, n, sd, wt)
+
+top_n_users <- user_res %>% top_n(n_users, wt = wt) %>% pull(userId)
 
 q <- edx %>% 
-  left_join(movie_effects_r, by = "movieId") %>%
-  left_join(user_effects_r, by = "userId") %>%
-  mutate(rating = rating - mu - m_i - u_j) %>%
-  select(userId, movieId, rating) %>%
-  filter(userId %in% pca_users & movieId %in% pca_movies) %>%
-  spread(movieId, rating) %>%
-  as.matrix()
+  filter(userId %in% top_n_users & movieId %in% top_n_movies) %>%
+  select(userId, movieId, rating) %>% as("realRatingMatrix")
 
-rownames(q)<- q[,1]
-q <- q[,-1]
-q[is.na(q)] <- 0
-movies <- edx %>% 
-  distinct(movieId, title, genres)
-colnames(q) <- with(movies, title[match(colnames(q), movieId)])
+rec <- Recommender(as(q, "realRatingMatrix"), method = "SVDF", parameter = 
+                     list(normalize = "center", k = 35))
 
-# q <- sweep(q, 2, colMeans(q, na.rm=TRUE))
-# q <- sweep(q, 1, rowMeans(q, na.rm=TRUE))
-
-pca <- prcomp(q)
-pc <- 1:nrow(pca$rotation)
-var_explained <- cumsum(pca$sdev^2 / sum(pca$sdev^2))
-qplot(pc, var_explained)
-
-
-
-# pca$x has PC's for columms and users for rows
-# pca$rotation has PC's for columns and movies for rows
-# Estimating PC's for ALL users
-users_pc <- edx %>% 
-  left_join(movie_effects_r, by = "movieId") %>%
-  left_join(user_effects_r, by = "userId") %>%
-  mutate(rating = rating - mu - m_i - u_j) %>%
-  filter(title %in% colnames(q)) %>%
-  group_by(userId) %>%
-  filter(n() > 1) %>%
-  group_modify(~ {
-    data.frame(t(.x$rating) %*% pca$rotation[.x$title,])
-  }) 
-
-# ALTERNATE IF COMING STRAIGHT FROM PCA
-users_pc <- data.frame(pca$x) %>% 
-  rownames_to_column(var = "userId") %>% 
-  remove_rownames() %>%
-  mutate(userId = as.integer(userId))
-
-# Must mock up data for users who haven't seen the movies included in the analysis
-users_wo_pc <- edx %>% 
-  distinct(userId) %>% 
-  anti_join(users_pc, by = "userId")
-empty_pc_cols <- matrix(
-  data = rep(0, nrow(users_wo_pc)*length(pca_movies)), nrow = nrow(users_wo_pc))
-colnames(empty_pc_cols) <- paste("PC",1:length(pca_movies), sep = "")
-users_wo_pc <- bind_cols(users_wo_pc, data.frame(empty_pc_cols))
-users_pc <- users_pc %>% union(users_wo_pc)
-
-
-
-# Find clusters of users
-clustering <- kmeans(users_pc[,-1], centers = pca_n_centers, iter.max = 25)
-user_clusters <- users_pc %>% select(userId) %>% add_column(cluster = clustering$cluster)
-cluster_means <- edx %>% 
-  left_join(movie_effects_r, by = "movieId") %>%
-  left_join(user_effects_r, by = "userId") %>%
-  left_join(user_clusters, by = "userId") %>%
-  mutate(rating = rating - mu - m_i - u_j) %>%
-  select(movieId, rating, cluster) %>%
-  group_by(movieId, cluster) %>%
-  summarize(c_k = sum(rating)/(n() + lambda_c), n_k = n())
-
-cluster_means %>% ggplot(aes(x = n_k, y = c_k)) + geom_point()
-
-mclust_predict <- function(newdata){
-  newdata %>% 
-    left_join(movie_effects_r, by = "movieId") %>%
-    left_join(user_effects_r, by = "userId") %>%
-    left_join(user_clusters, by = "userId") %>%
-    left_join(cluster_means, by = c("movieId", "cluster")) %>%
-    mutate(c_k = if_else(is.na(c_k), 0, c_k)) %>%
-    mutate(rating = mu + m_i + u_j + c_k) %>% pull(rating)
+rl_predict <- function(newdata){
+  
 }
 
-mclust_prediction <- mclust_predict(validation)
-mclust_RMSE <- RMSE(validation$rating, mclust_prediction)
+vx <- validation %>% 
+  filter(movieId %in% top_n_movies & userId %in% top_n_users) %>%
+  select(userId, movieId, rating)
 
-5, .85429
-47, .85154
-111, .852
 
+p <- recommenderlab::predict(object = rec, newdata = q, type = "ratings")
+pm <- p %>% 
+  as("matrix") %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "userId") %>%
+  remove_rownames() %>%
+  gather(movieId, rating, -userId, na.rm = TRUE) %>%
+  mutate(
+    movieId = as.integer(movieId),
+    userId = as.integer(userId)
+  )
+
+r1 <- RMSE(vx$rating, mufr_predict(vx))
+
+ub <- vx %>% select(movieId, userId) %>%
+  left_join(pm, by = c("movieId","userId")) %>% pull(rating) 
+
+r2 <- RMSE(vx$rating, ub)
+r2
