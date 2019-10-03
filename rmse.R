@@ -1,9 +1,12 @@
-################################
-# Model Data + Calculate RMSEs #
-################################
+#########################################
+#########################################
+## PREDICT RATINGS AND CALCULATE RMSES ##
+#########################################
+#########################################
 library(tidyverse)
 library(caret)
 load("./data/movielens.rda")
+results <- data.frame(Approach = character(), RMSE = double())
 
 ###################################
 #   SIMPLE AVERAGE APPROACH (c)   #
@@ -14,8 +17,10 @@ c_predict <- function(newdata){
   rep(mu, nrow(newdata))
 }
 
+c_approach <- "Simple Average"
 c_prediction <- c_predict(validation)
 c_RMSE <- RMSE(validation$rating, c_prediction)
+results <- add_row(results, Approach = c_approach, RMSE = c_RMSE)
 
 ###########################################
 #   MOVIE + USER EFFECTS APPROACH (muf)   #
@@ -37,21 +42,24 @@ muf_predict <- function(newdata){
     pull(rating)
 }
 
+muf_approach <- "Movie + User Effects"
 muf_prediction <- muf_predict(validation)
 muf_RMSE <- RMSE(validation$rating, muf_prediction)
+results <- add_row(results, Approach = muf_approach, RMSE = muf_RMSE)
 
 ##########################################################
 # MOVIE + USER EFFECTS APPROACH w/ REGULARIZATION (mufr) #
 ##########################################################
+
+lambda <- c(lambda_m = 4.702620605468748493649, lambda_u = 4.964661132812500099476)
 calibrate_lambda <- FALSE
-lambda <- c(3.87, 4.97)
 
 if(calibrate_lambda){
-  mufr_predict_pars <- function(train, test, lambda_m, lambda_u){
+  mufr_train_predict <- function(train, test, par){
     movie_effects_r_temp <- train %>% 
       group_by(movieId) %>%
       summarize(
-        m_i = sum(rating - mu)/(n() + lambda_m),
+        m_i = sum(rating - mu)/(n() + par[1]),
         n_i = n()
       )
     
@@ -59,7 +67,7 @@ if(calibrate_lambda){
       left_join(movie_effects_r_temp, by = "movieId") %>%
       group_by(userId) %>%
       summarize(
-        u_j = sum(rating - mu - m_i)/(n() + lambda_u),
+        u_j = sum(rating - mu - m_i)/(n() + par[2]),
         n_j = n()
       )
     
@@ -70,7 +78,7 @@ if(calibrate_lambda){
   }
   
   # Determining lambda(s) requires cross-validation #
-  k <- 5
+  k <- 10
   set.seed(23, sample.kind="Rounding")
   edx_folds <- createFolds(y = edx$rating, k = k)
   
@@ -89,15 +97,35 @@ if(calibrate_lambda){
   edx_fold_sizes_post <- sapply(edx_folds, length) # post-clean sizes
   
   # Optimizing Lambda on the average RMSEs of cross validated sets
-  cross_val_rmse <- function(lambda){
+  cross_val_rmse <- function(par){
     mean(sapply(edx_folds, function(fold){
-      RMSE(mufr_predict_pars(edx[-fold,],edx[fold,],lambda[1],lambda[2]), edx[fold,]$rating)
+      RMSE(mufr_train_predict(edx[-fold,],edx[fold,],par), edx[fold,]$rating)
     }))
   }
   
-  lambda_optim <- optim(par = lambda, fn = cross_val_rmse, control = list(maxit = 2))
+  # Calibrate lambda
+  lambda_optim <- optim(par = lambdas, fn = cross_val_rmse, control = list(maxit = 25, trace = TRUE))
   lambda <- lambda_optim$par
+  
+  # Plot Lambda
+  lambda_m <- lambda[1]
+  lambda_u <- lambda[2]
+  lambda_ms <- lambda_m + seq(-2,2,1)
+  lambda_us <- lambda_u + seq(-2,2,1)
+  tuningData <- expand_grid(lambda_m = lambda_ms, lambda_u = lambda_us) %>% 
+    rowwise() %>%
+    mutate(RMSE = cross_val_rmse(c(lambda_m,lambda_u))) %>%
+    ungroup()
+  
+  library(ggthemes)
+  tuningData %>% 
+    ggplot(aes(x = lambda_m, y = lambda_u, color = RMSE)) +
+    geom_point() + theme_few() + scale_color_gradient(low = "#f03a3a", high = "#030ffc")
+  
+  save(lambda_optim, lambda, tuningData, file = "./data/mufr")  
 }
+
+
 
 # Now with a decent lambda we can build and evaluate the tuned model
 movie_effects_r <- edx %>% 
@@ -125,53 +153,83 @@ mufr_predict <- function(newdata){
 mufr_prediction <- mufr_predict(validation)
 mufr_RMSE <- RMSE(validation$rating, mufr_prediction)
 
-###################
-# Recommender Lab #
-###################
+########################
+# Recommender Lab      #
+########################
 # https://cran.r-project.org/web/packages/recommenderlab/vignettes/recommenderlab.pdf
-
 library(recommenderlab)
-n_movies <- 500
-n_users <- 10000
+n_movies <- 1000
+n_users <- 1000
 
-movie_res <- edx %>% 
+edx_c <- edx %>% 
   left_join(movie_effects_r, by = "movieId") %>%
   left_join(user_effects_r, by = "userId") %>%
-  mutate(rating = rating - mu - m_i - u_j) %>%
-  group_by(movieId) %>% summarise(n = n(), sd = sd(rating)) %>%
-  mutate(wt = n*sd) %>% arrange(desc(wt))
+  mutate(rating = rating - mu - m_i - u_j)
 
-top_n_movies <- movie_res %>% top_n(n_movies, wt = wt) %>% pull(movieId)
+all_movies <- edx_c %>%
+  group_by(movieId) %>% summarise(n = n()) %>%
+  arrange(desc(n)) %>% pull(movieId)
 
-user_res <- edx %>% 
-  left_join(movie_effects_r, by = "movieId") %>%
-  left_join(user_effects_r, by = "userId") %>%
-  mutate(rating = rating - mu - m_i - u_j) %>%
-  filter(movieId %in% top_n_movies) %>%
-  group_by(userId) %>% summarise(n = n(), sd = sd(rating)) %>%
-  mutate(wt = n*sd) %>% arrange(desc(wt)) %>% 
-  select(userId, n, sd, wt)
+top_movies <- all_movies[1:n_movies]
 
-top_n_users <- user_res %>% top_n(n_users, wt = wt) %>% pull(userId)
+all_users <- edx_c %>%
+  filter(movieId %in% top_movies) %>%
+  group_by(userId) %>% summarise(n = n()) %>%
+  arrange(desc(n)) %>% pull(userId)
 
-q <- edx %>% 
-  filter(userId %in% top_n_users & movieId %in% top_n_movies) %>%
+top_users = all_movies[1:n_users]
+
+########################
+# SVD                  #
+########################
+
+edx_c_mini <- edx_c %>%
+  filter(userId %in% svd_users & movieId %in% svd_movies) %>%
   select(userId, movieId, rating) %>% as("realRatingMatrix")
 
-rec <- Recommender(as(q, "realRatingMatrix"), method = "SVDF", parameter = 
-                     list(normalize = "center", k = 35))
+edx_c_subset <- edx_c %>%
+  filter(movieId %in% svd_movies) %>%
+  select(userId, movieId, rating) %>% as("realRatingMatrix")
 
-rl_predict <- function(newdata){
+
+svd_rec <- Recommender(edx_c_mini, method = "SVD", parameter = 
+                         list(k = 100))
+
+ibcf_rec <- Recommender(edx_c_mini, method = "IBCF", parameter = 
+                          list(k = 100, method = "Pearson"))
+
+rl_predict <- function(rec, newdata){
+  rrm <- recommenderlab::predict(object = rec, newdata = edx_c_subset, type = "ratings")
   
+  rrdf <- rrm %>% 
+    as("matrix") %>% 
+    as.data.frame() %>%
+    rownames_to_column(var = "userId") %>%
+    remove_rownames() %>%
+    gather(movieId, rating, -userId, na.rm = TRUE) %>%
+    mutate(
+      movieId = as.integer(movieId),
+      userId = as.integer(userId)
+    )
+  
+  newdata %>% select(movieId, userId) %>%
+    left_join(svd_output_df, by = c("movieId", "userId")) %>%
+    left_join(movie_effects_r, by = "movieId") %>%
+    left_join(user_effects_r, by = "userId") %>%
+    mutate(rating = rating + mu + m_i + u_j) %>%
+    pull(rating)
 }
 
-vx <- validation %>% 
-  filter(movieId %in% top_n_movies & userId %in% top_n_users) %>%
-  select(userId, movieId, rating)
+svd_prediction <- rl_predict(svd_rec, validation)
+ibcf_prediction <- rl_predict(ibcf_rec, validation)
 
+mean(!is.na(svd_prediction))
+svd_prediction <- if_else(is.na(svd_prediction), mufr_predict(validation), svd_prediction)
+svd_RMSE <- RMSE(validation$rating, svd_prediction)
+svd_RMSE
 
-p <- recommenderlab::predict(object = rec, newdata = q, type = "ratings")
-pm <- p %>% 
+svd_output <- recommenderlab::predict(object = svd_rec, newdata = svd_all, type = "ratings")
+svd_output_df <- svd_output %>% 
   as("matrix") %>% 
   as.data.frame() %>%
   rownames_to_column(var = "userId") %>%
@@ -182,10 +240,79 @@ pm <- p %>%
     userId = as.integer(userId)
   )
 
-r1 <- RMSE(vx$rating, mufr_predict(vx))
+svd_predict <- function(newdata){
+  newdata %>% select(movieId, userId) %>%
+    left_join(svd_output_df, by = c("movieId", "userId")) %>%
+    left_join(movie_effects_r, by = "movieId") %>%
+    left_join(user_effects_r, by = "userId") %>%
+    mutate(rating = rating + mu + m_i + u_j) %>%
+    pull(rating)
+}
 
-ub <- vx %>% select(movieId, userId) %>%
-  left_join(pm, by = c("movieId","userId")) %>% pull(rating) 
+svd_prediction <- svd_predict(validation)
+mean(!is.na(svd_prediction))
+svd_prediction <- if_else(is.na(svd_prediction), mufr_predict(validation), svd_prediction)
+svd_RMSE <- RMSE(validation$rating, svd_prediction)
+svd_RMSE
 
-r2 <- RMSE(vx$rating, ub)
-r2
+########################
+# ibcf                 #
+########################
+
+ibcf_n_movies <- 1000
+ibcf_n_users <- 1000
+ibcf_movies <- all_movies[1:ibcf_n_movies]
+
+ibcf_users <- edx_c %>%
+  filter(movieId %in% ibcf_movies) %>%
+  group_by(userId) %>% summarise(n = n(), sd = sd(rating)) %>%
+  mutate(wt = n*sd) %>% arrange(desc(wt)) %>% 
+  select(userId, n, sd, wt) %>%
+  top_n(ibcf_n_users, wt = wt) %>% 
+  pull(userId)
+
+ibcf_train <- edx %>% 
+  left_join(movie_effects_r, by = "movieId") %>%
+  left_join(user_effects_r, by = "userId") %>%
+  mutate(rating = rating - mu - m_i - u_j) %>%
+  filter(userId %in% ibcf_users & movieId %in% ibcf_movies) %>%
+  select(userId, movieId, rating) %>% as("realRatingMatrix")
+
+ibcf_all <- edx %>% 
+  left_join(movie_effects_r, by = "movieId") %>%
+  left_join(user_effects_r, by = "userId") %>%
+  mutate(rating = rating - mu - m_i - u_j) %>%
+  filter(movieId %in% ibcf_movies) %>%
+  select(userId, movieId, rating) %>% as("realRatingMatrix")
+
+ibcf_rec <- Recommender(ibcf_train, method = "IBCF", parameter = 
+                          list(k = 150, method = "Pearson"))
+
+ibcf_output <- recommenderlab::predict(object = ibcf_rec, newdata = ibcf_all, type = "ratings")
+ibcf_output_df <- ibcf_output %>% 
+  as("matrix") %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "userId") %>%
+  remove_rownames() %>%
+  gather(movieId, rating, -userId, na.rm = TRUE) %>%
+  mutate(
+    movieId = as.integer(movieId),
+    userId = as.integer(userId)
+  ) 
+
+ibcf_predict <- function(newdata){
+  newdata %>% select(movieId, userId) %>%
+    left_join(ibcf_output_df, by = c("movieId", "userId")) %>%
+    left_join(movie_effects_r, by = "movieId") %>%
+    left_join(user_effects_r, by = "userId") %>%
+    mutate(rating = rating + mu + m_i + u_j) %>%
+    pull(rating)
+}
+
+ibcf_prediction <- ibcf_predict(validation)
+mean(!is.na(ibcf_prediction))
+ibcf_prediction <- if_else(is.na(ibcf_prediction), mufr_predict(validation), ibcf_prediction)
+ibcf_RMSE <- RMSE(validation$rating, ibcf_prediction)
+ibcf_RMSE
+
+
