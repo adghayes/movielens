@@ -233,26 +233,6 @@ svd_RMSE <- RMSE(validation$rating, if_else(is.na(svd_prediction), mufr_predicti
 ibcf_RMSE <- RMSE(validation$rating, if_else(is.na(ibcf_prediction), mufr_prediction, ibcf_prediction))
 ubcf_RMSE <- RMSE(validation$rating, if_else(is.na(ubcf_prediction), mufr_prediction, ubcf_prediction))
 
-
-# Create an ensemble of the different approaches, excluding UBCF
-ens_prediction <- function(mufr_wt, svd_wt, ibcf_wt){
-  predictions %>% mutate(
-    wt = mufr_wt + is.finite(svd)*svd_wt + is.finite(ibcf)*ibcf_wt, # + is.finite(ubcf)*ubcf_wt,
-    sum_wt = mufr*mufr_wt + 
-      if_else(is.finite(svd), svd*svd_wt, 0) +
-      if_else(is.finite(ibcf), ibcf*ibcf_wt, 0), # +
-      # if_else(is.finite(ubcf), ubcf*ubcf_wt, 0),
-    pred_wt = sum_wt/wt
-  ) %>% pull(pred_wt)
-}
-
-ens_rmse <- function(wts){
-  RMSE(ens_prediction(wts[1],wts[2],wts[3]), validation$rating)
-}
-
-wts_0 <- c(.3,3.4, 1.8)
-ens_optim <- optim(par = wts_0, fn = ens_rmse, control = list(trace = TRUE)) 
-
 #####################################################################################
 #####################################################################################
 #####################################################################################
