@@ -6,7 +6,6 @@
 library(tidyverse)
 library(caret)
 load("./data/movielens.rda")
-results <- data.frame(Approach = character(), RMSE = double())
 
 ###################################
 #   SIMPLE AVERAGE APPROACH (c)   #
@@ -17,10 +16,8 @@ c_predict <- function(newdata){
   rep(mu, nrow(newdata))
 }
 
-c_approach <- "Simple Average"
 c_prediction <- c_predict(validation)
 c_RMSE <- RMSE(validation$rating, c_prediction)
-results <- add_row(results, Approach = c_approach, RMSE = c_RMSE)
 
 ###########################################
 #   MOVIE + USER EFFECTS APPROACH (muf)   #
@@ -42,92 +39,85 @@ muf_predict <- function(newdata){
     pull(rating)
 }
 
-muf_approach <- "Movie + User Effects"
 muf_prediction <- muf_predict(validation)
 muf_RMSE <- RMSE(validation$rating, muf_prediction)
-results <- add_row(results, Approach = muf_approach, RMSE = muf_RMSE)
 
 ##########################################################
 # MOVIE + USER EFFECTS APPROACH w/ REGULARIZATION (mufr) #
 ##########################################################
+# Need to use cross validation to optimize the lambdas, a
+# lambda_m for movie effects and lambda_u for user effects
 
-lambda <- c(lambda_m = 4.702620605468748493649, lambda_u = 4.964661132812500099476)
-calibrate_lambda <- FALSE
-
-if(calibrate_lambda){
-  mufr_train_predict <- function(train, test, par){
-    movie_effects_r_temp <- train %>% 
-      group_by(movieId) %>%
-      summarize(
-        m_i = sum(rating - mu)/(n() + par[1]),
-        n_i = n()
-      )
-    
-    user_effects_r_temp <- train %>% 
-      left_join(movie_effects_r_temp, by = "movieId") %>%
-      group_by(userId) %>%
-      summarize(
-        u_j = sum(rating - mu - m_i)/(n() + par[2]),
-        n_j = n()
-      )
-    
-    test %>% 
-      left_join(movie_effects_r_temp, by = "movieId") %>%
-      left_join(user_effects_r_temp, by = "userId") %>%
-      mutate(rating = mu + m_i + u_j) %>% pull(rating)
-  }
+# Model which can be trained on various train
+# sets for cross-validation
+mufr_train_predict <- function(data, newdata, lambda){
+  movie_effects_r_temp <- data %>% 
+    group_by(movieId) %>%
+    summarize(
+      m_i = sum(rating - mu)/(n() + lambda[1]),
+      n_i = n()
+    )
   
-  # Determining lambda(s) requires cross-validation #
-  k <- 10
-  set.seed(23, sample.kind="Rounding")
-  edx_folds <- createFolds(y = edx$rating, k = k)
+  user_effects_r_temp <- data %>% 
+    left_join(movie_effects_r_temp, by = "movieId") %>%
+    group_by(userId) %>%
+    summarize(
+      u_j = sum(rating - mu - m_i)/(n() + lambda[2]),
+      n_j = n()
+    )
   
-  # Removing unknown users/movies from test partitions
-  clean_edx_fold <- function(fold){
-    test <- bind_cols(edx[fold,], index = fold)
-    train <- edx[-fold,]
-    test <- test %>%
-      semi_join(train, by = "movieId") %>%
-      semi_join(train, by = "userId")
-    test$index
-  }
-  
-  edx_fold_sizes_pre <- sapply(edx_folds, length) # pre-clean sizes
-  edx_folds <- lapply(edx_folds, clean_edx_fold)
-  edx_fold_sizes_post <- sapply(edx_folds, length) # post-clean sizes
-  
-  # Optimizing Lambda on the average RMSEs of cross validated sets
-  cross_val_rmse <- function(par){
-    mean(sapply(edx_folds, function(fold){
-      RMSE(mufr_train_predict(edx[-fold,],edx[fold,],par), edx[fold,]$rating)
-    }))
-  }
-  
-  # Calibrate lambda
-  lambda_optim <- optim(par = lambdas, fn = cross_val_rmse, control = list(maxit = 25, trace = TRUE))
-  lambda <- lambda_optim$par
-  
-  # Plot Lambda
-  lambda_m <- lambda[1]
-  lambda_u <- lambda[2]
-  lambda_ms <- lambda_m + seq(-2,2,1)
-  lambda_us <- lambda_u + seq(-2,2,1)
-  tuningData <- expand_grid(lambda_m = lambda_ms, lambda_u = lambda_us) %>% 
-    rowwise() %>%
-    mutate(RMSE = cross_val_rmse(c(lambda_m,lambda_u))) %>%
-    ungroup()
-  
-  library(ggthemes)
-  tuningData %>% 
-    ggplot(aes(x = lambda_m, y = lambda_u, color = RMSE)) +
-    geom_point() + theme_few() + scale_color_gradient(low = "#f03a3a", high = "#030ffc")
-  
-  save(lambda_optim, lambda, tuningData, file = "./data/mufr")  
+  newdata %>% 
+    left_join(movie_effects_r_temp, by = "movieId") %>%
+    left_join(user_effects_r_temp, by = "userId") %>%
+    mutate(rating = mu + m_i + u_j) %>% pull(rating)
 }
 
+# Creating Folds
+k <- 10
+set.seed(23, sample.kind="Rounding")
+edx_folds <- createFolds(y = edx$rating, k = k)
+
+# Removing unknown users/movies from test partitions, 
+# as in the creation of the full dataset
+clean_edx_fold <- function(fold){
+  test <- bind_cols(edx[fold,], index = fold)
+  train <- edx[-fold,]
+  test <- test %>%
+    semi_join(train, by = "movieId") %>%
+    semi_join(train, by = "userId")
+  test$index
+}
+
+edx_fold_sizes_pre <- sapply(edx_folds, length) # pre-clean sizes
+edx_folds <- lapply(edx_folds, clean_edx_fold)
+edx_fold_sizes_post <- sapply(edx_folds, length) # post-clean sizes
+
+edx_fold_summary <- data.frame(name = names(edx_folds),
+                               intial_size = edx_fold_sizes_pre,
+                               clean_size = edx_fold_sizes_post)
+
+# Function to calculate mean of RMSEs across folds given a lambda, for optim
+cross_validate_rmse <- function(lambda){
+  mean(sapply(edx_folds, function(fold){
+    RMSE(mufr_train_predict(edx[-fold,],edx[fold,],lambda), edx[fold,]$rating)
+  }))
+}
+
+# Calibrate lambda with Nelder-Mead optimization
+lambda_0 <- c(lambda_m = 4.70262, lambda_u = 4.96466)
+lambda_optim <- optim(par = lambda_0, fn = cross_val_rmse, control = list(maxit = 25, trace = TRUE))
+lambda <- lambda_optim$par
+
+# Understand lambda's neighborhood (to plot in report)
+lambda_m <- lambda[1]
+lambda_u <- lambda[2]
+lambda_ms <- lambda_m + seq(-2,2,1)
+lambda_us <- lambda_u + seq(-2,2,1)
+tuningData <- expand_grid(lambda_m = lambda_ms, lambda_u = lambda_us) %>% 
+  mutate(value = apply(X = ., MARGIN = 1, FUN = cross_validate_rmse))
 
 
-# Now with a decent lambda we can build and evaluate the tuned model
+# With lambda tuned, create actual model with regularized effects
 movie_effects_r <- edx %>% 
   group_by(movieId) %>%
   summarize(
@@ -153,10 +143,13 @@ mufr_predict <- function(newdata){
 mufr_prediction <- mufr_predict(validation)
 mufr_RMSE <- RMSE(validation$rating, mufr_prediction)
 
-########################
-# Recommender Lab      #
-########################
+#######################################
+#  Appendix: RECOMMENDER LAB (rl)     #
+#######################################
 # https://cran.r-project.org/web/packages/recommenderlab/vignettes/recommenderlab.pdf
+# NOTE: In this section tuning is done not via cross-validation as would be best practice,
+# but on the test set itself. This is more exploratory, and the computation expense
+# was too high to do standard training with tuningGrids and k-folds on my local
 library(recommenderlab)
 n_movies <- 1000
 n_users <- 1000
@@ -179,28 +172,28 @@ all_users <- edx_c %>%
 
 top_users = all_movies[1:n_users]
 
-########################
-# SVD                  #
-########################
-
+# Matrix of ratings for 1000 most common movies for subset of users
 edx_c_mini <- edx_c %>%
-  filter(userId %in% svd_users & movieId %in% svd_movies) %>%
+  filter(userId %in% top_users & movieId %in% top_movies) %>%
   select(userId, movieId, rating) %>% as("realRatingMatrix")
 
+# Matrix of ratings for 1000 most common movies for all users in edx
 edx_c_subset <- edx_c %>%
-  filter(movieId %in% svd_movies) %>%
+  filter(movieId %in% top_movies) %>%
   select(userId, movieId, rating) %>% as("realRatingMatrix")
 
-
+# Training different models on the same data
 svd_rec <- Recommender(edx_c_mini, method = "SVD", parameter = 
-                         list(k = 100))
-
+                         list(k = 20))
 ibcf_rec <- Recommender(edx_c_mini, method = "IBCF", parameter = 
-                          list(k = 100, method = "Pearson"))
+                          list(k = 400, method = "Pearson"))
+ubcf_rec <- Recommender(edx_c_mini, method = "UBCF", parameter = 
+                          list(method = "Pearson", nn = 10))
 
 rl_predict <- function(rec, newdata){
-  rrm <- recommenderlab::predict(object = rec, newdata = edx_c_subset, type = "ratings")
+  rrm <- recommenderlab::predict(object = rec, newdata = edx_c_subset, type = "ratings") 
   
+  # Need to convert predicted ratings matrix into data frame form
   rrdf <- rrm %>% 
     as("matrix") %>% 
     as.data.frame() %>%
@@ -213,7 +206,7 @@ rl_predict <- function(rec, newdata){
     )
   
   newdata %>% select(movieId, userId) %>%
-    left_join(svd_output_df, by = c("movieId", "userId")) %>%
+    left_join(rrdf, by = c("movieId", "userId")) %>%
     left_join(movie_effects_r, by = "movieId") %>%
     left_join(user_effects_r, by = "userId") %>%
     mutate(rating = rating + mu + m_i + u_j) %>%
@@ -222,4 +215,63 @@ rl_predict <- function(rec, newdata){
 
 svd_prediction <- rl_predict(svd_rec, validation)
 ibcf_prediction <- rl_predict(ibcf_rec, validation)
+ubcf_prediction <- rl_predict(ubcf_rec, validation)
 
+predictions <- data.frame(mufr = mufr_prediction,
+                          svd = svd_prediction,
+                          ibcf = ibcf_prediction,
+                          ubcf = ubcf_prediction, 
+                          actual = validation$rating)
+
+# Check how predictions compare when they exist
+predictions %>% filter(!is.na(ubcf)) %>% summarize(RMSE(mufr,actual),RMSE(ubcf,actual))
+predictions %>% filter(!is.na(ibcf)) %>% summarize(RMSE(mufr,actual),RMSE(ibcf,actual))
+predictions %>% filter(!is.na(svd)) %>% summarize(RMSE(mufr,actual),RMSE(svd,actual))
+
+# Combine New Predictions with our standard model 
+svd_RMSE <- RMSE(validation$rating, if_else(is.na(svd_prediction), mufr_prediction, svd_prediction))
+ibcf_RMSE <- RMSE(validation$rating, if_else(is.na(ibcf_prediction), mufr_prediction, ibcf_prediction))
+ubcf_RMSE <- RMSE(validation$rating, if_else(is.na(ubcf_prediction), mufr_prediction, ubcf_prediction))
+
+
+# Create an ensemble of the different approaches, excluding UBCF
+ens_prediction <- function(mufr_wt, svd_wt, ibcf_wt){
+  predictions %>% mutate(
+    wt = mufr_wt + is.finite(svd)*svd_wt + is.finite(ibcf)*ibcf_wt, # + is.finite(ubcf)*ubcf_wt,
+    sum_wt = mufr*mufr_wt + 
+      if_else(is.finite(svd), svd*svd_wt, 0) +
+      if_else(is.finite(ibcf), ibcf*ibcf_wt, 0), # +
+      # if_else(is.finite(ubcf), ubcf*ubcf_wt, 0),
+    pred_wt = sum_wt/wt
+  ) %>% pull(pred_wt)
+}
+
+ens_rmse <- function(wts){
+  RMSE(ens_prediction(wts[1],wts[2],wts[3]), validation$rating)
+}
+
+wts_0 <- c(.3,3.4, 1.8)
+ens_optim <- optim(par = wts_0, fn = ens_rmse, control = list(trace = TRUE)) 
+
+#####################################################################################
+#####################################################################################
+#####################################################################################
+# Saving results to file for later user in report...
+
+
+
+results <- data.frame(Name = c("Simple Average", "Movie + User Effects", 
+                               "Regularlized Effects (MUFR)", "MUFR + SVD*",
+                               "MUFR + IBCF*", "MUFR + UBCF*" " MUFR + IBCF + SVD*"),
+                      RMSE = c(c_RMSE, muf_RMSE, mufr_RMSE,
+                               svd_RMSE, ibcf_RMSE, ubcf_RMSE,
+                               ens_RMSE))
+movies <- edx %>% distinct(movieId, title, genres)
+  
+save(mu, c_prediction, 
+     movie_effects, user_effects, muf_prediction, 
+     k, edx_fold_summary, lambda_optim, lambda, tuningData,
+     movie_effects_r, user_effects_r, mufr_prediction,
+     results, movies,
+     file = "./data/output.rda"
+     )
