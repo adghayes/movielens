@@ -15,6 +15,8 @@ if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.
 # Moved to local copy to allow offline work, not using the below two lines:
 # dl <- tempfile()
 # download.file("files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+this.dir <- dirname(parent.frame(2)$ofile)
+setwd(this.dir)
 
 ratings <- fread(text = gsub("::", "\t", readLines("./data/ratings.dat")),
                  col.names = c("userId", "movieId", "rating", "timestamp"))

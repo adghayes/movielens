@@ -1,0 +1,136 @@
+---
+title: "Predicting Users' Movie Ratings"
+author: "Andrew Hayes"
+date: "10/3/2019"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+# Overview
+
+This is a rating prediction project based off of the Netflix challenge.
+
+```{r include = FALSE}
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+load("./data/output.rda")
+```
+
+# Methods
+
+### Data Preparation
+
+The 1 million ratings used for this project are a subset of the entire 10 million rating Movielens dataset, available at this address: <https://grouplens.org/datasets/movielens/10m/>. Using the script provided in class, the data was imported from flat files and split into training and test datasets called *edx* and *validation* respectively. Users or movies that occured only in the test set were removed and added back to the training set, to avoid making predictions on net new movies or users.
+
+### Measuring Effectiveness
+
+The main measure of effectiveness across various models was root mean squared error (RMSE) between actual user-movie ratings and predicted ratings. Other aspects of the ratings, like the appropriateness of resulting movie recommendations, were also considered.
+
+## Models
+
+A series of increasingly complex models were used to predict ratings on the test set. The first three - simple average, movie + user effects, and regularized movie + user effects - are implementations of the models demonstrated in the *Data Science: Machine Learning* course. The last three are exploratory and use the __recommenderlab__ package. The first three models were tuned only on the training set as is best practice. The final three, because they were exploratory and outside the requirements of this project, were tuned on the test set in the interests of time. 
+
+### Simple Average Model
+
+As a baseline model, we minimize RMSE by predicting the global average. In other words, the model assumes that all movies have the same true rating and all variation independent of movie $i$ or user $j$:
+
+$$r_{ij} = \mu + \epsilon_{ij}$$
+
+### Movie + User Effects Model
+
+In this model we assume each movie and user introduces a deviation or "effect" from the global true rating. The movie effect $m_i$ is the average deviation of movie $i$ from the global mean, and allows for what we already know: that some movies are better than other (or at least perceived as better). The user effect $u_j$ is the average deviation of user $j$ from the average rating of each movies they watch. This is to adjust for the fact that some users rate movies on average more highly that users do. Our resulting model is: 
+
+$$r_{ij} = \mu + m_i + u_j + \epsilon_{ij}$$
+$$m_i = \frac{1}{n_i}\sum_{k} (r_{ij_k} - \mu)$$ 
+$$u_j = \frac{1}{n_j}\sum_{k} (r_{i_kj} - m_{i_k} - \mu)$$
+where $n_i$ and $n_j$ represent the number of ratings that a movie or user has.
+
+### Regularized Movie + User Effects Model
+
+An extension of the plain Movie + User Effects Model, the regularized extension recognizes that a simple mean to determine movie or user effects has negative results in predictions due to small sample sizes. For example, if one and only one person rates movie $i$ and that rating is a $5$, that $m_i$ is going to indicate a very good movie when in fact that may have been an accidental rating or a user with unique preferences. To regularize for small sample sizes, we introduce terms $\lambda_m$ and $\lambda_u$ when calculating effects to reduce them disproportionately for small samples:
+
+$$m_i = \frac{1}{n_i + \lambda_m}\sum_{k} (r_{ij_k} - \mu)$$ 
+
+$$u_j = \frac{1}{n_j + \lambda_u}\sum_{k} (r_{i_kj} - m_{i_k} - \mu)$$
+The values of the $\lambda$'s was determined by optimizing on the training set with cross-validation ($k = 10$). When creating the folds, users or movies who appreared in the "test fold" but not the "training fold" were removed to the training fold, just as was done with the actual test set during data preparation. After applying the model to each fold, the mean of the 10 RMSE's was calculated and minimized with Nelder-Mead, R's default optimization algorithm.
+
+### Recommender Lab: SVD, IBCF, and UBCF
+
+The **recommenderlab** R package was used to build more personalized models. The three previous models, while they attempt to minimize the RMSE, cannot be used for personalization. The two "Effects" models differentiate movies but only insofar as one is more highly rated than another, not that Person A might prefer Movie X while Person B might prefer Movie Y. **Note:** These three approaches were not finely tuned, and the only tuning that took place was on the *test* set. This was due to the computational intensiveness of these approaches which makes testing them a very lengthy process. Truly training these models with tune grids and cross-validation would require a more powerful machine in a hosted environment.
+
+For all three Recommender Lab models, the data was prepared in the same way. After normalizing and regularizing ratings, the residuals from the 1000 most rated movies and the 1000 users with the most ratings among those movies were pulled to form a 1000x1000 ratings matrix. A second matrix of the 1000 most rated movies and *any* user who had rated *any* of those movies was also created (69871x1000), to input to recommenderlab's predict function which attempts to fill in the unknowns in a provided ratings matrix. 
+
+A Singular Value Decomposition (SVD), Item Based Collaborative Filtering (ICBF), and User Based Collaborative Filter (UCBF) model were all trained on the 1000x1000 matrix. Then, those models were used to predict missing ratings in the 69871x1000 matrix. Because Recommender Lab only predicts ratings for items (here movies) it has already seen, they did not make predictions for all ratings in the test set. In the case of ICBF and UCBF, sometimes no ratings were predicted even for movies included in the model when not enough user or movie data was available. Results from the "Regularized Movie + User Effects Model" were interpolated to make a full prediction. Also, the recommenderlab predict function is not aware of the limits on our rating scales of 0.5 - 5.0, so ratings outside of that range were adjusted to the border. 
+
+# Results
+
+The RMSE's for the various models are:
+
+
+```{r results, echo=FALSE}
+kable(results, booktabs = T, linesep = "") %>% kable_styling()
+```
+
+
+## Results of Including Effects
+The largest improvement by far is from the simple average model to the movie and user effects model. Clearly both movies and users have substantial effects that we benefit by accounting for. 
+
+The improvement from regularization was much smaller, less than $10^{-3}$. Lambda was optimized via cross-validation at $\lambda_m = `r lambda[1]`$ and $\lambda_u = `r lambda[2]`$. The tuning is visualized here with a tuning grid constructed after the fact, centered at the optimal value:
+
+
+```{r tuningGrid, echo=FALSE}
+library(ggthemes)
+tuningData %>% 
+ ggplot(aes(x = lambda_m, y = lambda_u, color = value)) +
+  geom_point() + 
+  theme_few() + 
+  scale_color_gradient(low = "#f03a3a", high = "#030ffc") + 
+  labs(y = "User Lambda", x = "Movie Lambda", color = "RMSE")
+  
+```
+
+You can see that the value was relatively much more senstive $\lambda_u$ than $\lambda_m$, but the difference between various parameters shown in the plot are all in the $<10^{-4}$ range. While the change in RMSE was small, the change in our top movies was very signifcant. Compare the top ten movies for the normal and regularized models:
+
+```{r top_movies, echo = FALSE}
+muf_top_ten <- movie_effects %>% 
+  top_n(10, wt = m_i) %>% 
+  arrange(desc(m_i)) %>% 
+  left_join(movies, by = "movieId") %>%
+  mutate(title = str_trunc(str_remove(title, "\\(\\d{4}\\)"), 50)) %>%
+  select(title , n_i)
+mufr_top_ten <- movie_effects_r %>% 
+  top_n(10, wt = m_i) %>% 
+  arrange(desc(m_i)) %>% 
+  left_join(movies, by = "movieId") %>%
+  mutate(title = str_trunc(str_remove(title, "\\(\\d{4}\\)"), 50)) %>%
+  select(title, n_i)
+kable(muf_top_ten, row.names = TRUE, booktabs = T, 
+      linesep = "", col.names = c("Title", "n"), caption = "No Regularization") %>%
+  kable_styling()
+kable(mufr_top_ten, row.names = TRUE, booktabs = T, 
+      linesep = "", col.names = c("Title", "n"), caption = "Regularization") %>%
+  kable_styling()
+```
+
+Without regularization, the best movies are niche independent or foreign films that have only one or two 5-star ratings. With regularization, many more familiar movies known for being popular rise to the top. The effects plotted against the size of their samples, before and after regulazation, also help visualize the shift:
+
+```{r effect_plot, echo = FALSE}
+movie_effects_both <- movie_effects %>% add_column(time = "Before") %>%
+  dplyr::union(movie_effects_r %>% add_column(time = "After")) %>% 
+  mutate(time = factor(time, levels = c("Before", "After"))) 
+movie_effects_both %>%
+  ggplot(aes(x = n_i, y = m_i)) +
+  geom_point(alpha = .5, color = "blue") +
+  facet_grid(.~time) + 
+  theme_few()
+```
+ ## Results of Personalization
+ 
+
+
+# Conclusion

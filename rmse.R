@@ -5,6 +5,9 @@
 #########################################
 library(tidyverse)
 library(caret)
+
+this.dir <- dirname(parent.frame(2)$ofile)
+setwd(this.dir)
 load("./data/movielens.rda")
 
 ###################################
@@ -105,7 +108,7 @@ cross_validate_rmse <- function(lambda){
 
 # Calibrate lambda with Nelder-Mead optimization
 lambda_0 <- c(lambda_m = 4.70262, lambda_u = 4.96466)
-lambda_optim <- optim(par = lambda_0, fn = cross_val_rmse, control = list(maxit = 25, trace = TRUE))
+lambda_optim <- optim(par = lambda_0, fn = cross_validatet_rmse, control = list(maxit = 25, trace = TRUE))
 lambda <- lambda_optim$par
 
 # Understand lambda's neighborhood (to plot in report)
@@ -210,6 +213,8 @@ rl_predict <- function(rec, newdata){
     left_join(movie_effects_r, by = "movieId") %>%
     left_join(user_effects_r, by = "userId") %>%
     mutate(rating = rating + mu + m_i + u_j) %>%
+    mutate(rating = if_else(rating > 5, 5, rating)) %>%
+    mutate(rating = if_else(rating < .5, .5, rating)) %>%
     pull(rating)
 }
 
@@ -228,30 +233,32 @@ predictions %>% filter(!is.na(ubcf)) %>% summarize(RMSE(mufr,actual),RMSE(ubcf,a
 predictions %>% filter(!is.na(ibcf)) %>% summarize(RMSE(mufr,actual),RMSE(ibcf,actual))
 predictions %>% filter(!is.na(svd)) %>% summarize(RMSE(mufr,actual),RMSE(svd,actual))
 
-# Combine New Predictions with our standard model 
-svd_RMSE <- RMSE(validation$rating, if_else(is.na(svd_prediction), mufr_prediction, svd_prediction))
-ibcf_RMSE <- RMSE(validation$rating, if_else(is.na(ibcf_prediction), mufr_prediction, ibcf_prediction))
-ubcf_RMSE <- RMSE(validation$rating, if_else(is.na(ubcf_prediction), mufr_prediction, ubcf_prediction))
+# Combine new predictions with our standard model 
+predictions <- predictions %>% mutate_all( ~ if_else(is.na(.), mufr, .))
+svd_RMSE <- RMSE(validation$rating, predictions$svd)
+ibcf_RMSE <- RMSE(validation$rating, predictions$ibcf)
+ubcf_RMSE <- RMSE(validation$rating, predictions$ubcf)
 
 #####################################################################################
 #####################################################################################
 #####################################################################################
 # Saving results to file for later user in report...
 
-
-
 results <- data.frame(Name = c("Simple Average", "Movie + User Effects", 
-                               "Regularlized Effects (MUFR)", "MUFR + SVD*",
-                               "MUFR + IBCF*", "MUFR + UBCF*" " MUFR + IBCF + SVD*"),
+                               "Regularized Effects (MUFR)", "MUFR + SVD",
+                               "MUFR + IBCF", "MUFR + UBCF"),
                       RMSE = c(c_RMSE, muf_RMSE, mufr_RMSE,
-                               svd_RMSE, ibcf_RMSE, ubcf_RMSE,
-                               ens_RMSE))
+                               svd_RMSE, ibcf_RMSE, ubcf_RMSE))
 movies <- edx %>% distinct(movieId, title, genres)
   
+top_recs <- predictions %>% select(-actual) %>%
+  add_column(userId = validation$userId, movieId = validation$movieId) %>%
+  filter(userId %in% 1:100)
+
 save(mu, c_prediction, 
-     movie_effects, user_effects, muf_prediction, 
+     movie_effects, user_effects,
      k, edx_fold_summary, lambda_optim, lambda, tuningData,
-     movie_effects_r, user_effects_r, mufr_prediction,
-     results, movies,
+     movie_effects_r, user_effects_r,
+     results, movies, top_recs,
      file = "./data/output.rda"
      )
