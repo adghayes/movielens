@@ -21,6 +21,7 @@ c_predict <- function(newdata){
 
 c_prediction <- c_predict(validation)
 c_RMSE <- RMSE(validation$rating, c_prediction)
+c_RMSE
 
 ###########################################
 #   MOVIE + USER EFFECTS APPROACH (muf)   #
@@ -34,16 +35,26 @@ user_effects <- edx %>%
   group_by(userId) %>%
   summarize(u_j = mean(rating - mu - m_i), n_j = n())
 
+# Helper function to deal with out of bounds predictions
+bounded <- function(rating){
+  case_when(
+   rating > 5 ~ 5,
+   rating < .5 ~ .5,
+   TRUE ~ rating
+  )
+}
+
 muf_predict <- function(newdata){
   newdata %>% 
     left_join(movie_effects, by = "movieId") %>%
     left_join(user_effects, by = "userId") %>%
-    mutate(rating = mu + m_i + u_j) %>%
+    mutate(rating = bounded(mu + m_i + u_j)) %>%
     pull(rating)
 }
 
 muf_prediction <- muf_predict(validation)
 muf_RMSE <- RMSE(validation$rating, muf_prediction)
+muf_RMSE
 
 ##########################################################
 # MOVIE + USER EFFECTS APPROACH w/ REGULARIZATION (mufr) #
@@ -72,11 +83,13 @@ mufr_train_predict <- function(data, newdata, lambda){
   newdata %>% 
     left_join(movie_effects_r_temp, by = "movieId") %>%
     left_join(user_effects_r_temp, by = "userId") %>%
-    mutate(rating = mu + m_i + u_j) %>% pull(rating)
+    mutate(rating = bounded(mu + m_i + u_j)) %>%
+    pull(rating)
 }
 
 # Creating Folds
 k <- 10
+k
 set.seed(23, sample.kind="Rounding")
 edx_folds <- createFolds(y = edx$rating, k = k)
 
@@ -98,6 +111,7 @@ edx_fold_sizes_post <- sapply(edx_folds, length) # post-clean sizes
 edx_fold_summary <- data.frame(name = names(edx_folds),
                                intial_size = edx_fold_sizes_pre,
                                clean_size = edx_fold_sizes_post)
+edx_fold_summary
 
 # Function to calculate mean of RMSEs across folds given a lambda, for optim
 cross_validate_rmse <- function(lambda){
@@ -110,6 +124,7 @@ cross_validate_rmse <- function(lambda){
 lambda_0 <- c(lambda_m = 4.70262, lambda_u = 4.96466)
 lambda_optim <- optim(par = lambda_0, fn = cross_validatet_rmse, control = list(maxit = 25, trace = TRUE))
 lambda <- lambda_optim$par
+lambda_optim
 
 # Understand lambda's neighborhood (to plot in report)
 lambda_m <- lambda[1]
@@ -140,11 +155,12 @@ mufr_predict <- function(newdata){
   newdata %>% 
     left_join(movie_effects_r, by = "movieId") %>%
     left_join(user_effects_r, by = "userId") %>%
-    mutate(rating = mu + m_i + u_j) %>% pull(rating)
+    mutate(rating = bounded(mu + m_i + u_j)) %>% pull(rating)
 }
 
 mufr_prediction <- mufr_predict(validation)
 mufr_RMSE <- RMSE(validation$rating, mufr_prediction)
+mufr_RMSE
 
 #######################################
 #  Appendix: RECOMMENDER LAB (rl)     #
@@ -181,63 +197,61 @@ edx_c_mini <- edx_c %>%
   select(userId, movieId, rating) %>% as("realRatingMatrix")
 
 # Matrix of ratings for 1000 most common movies for all users in edx
-edx_c_subset <- edx_c %>%
+edx_c_top_movies <- edx_c %>%
   filter(movieId %in% top_movies) %>%
   select(userId, movieId, rating) %>% as("realRatingMatrix")
 
 # Training different models on the same data
-svd_rec <- Recommender(edx_c_mini, method = "SVD", parameter = 
-                         list(k = 20))
-ibcf_rec <- Recommender(edx_c_mini, method = "IBCF", parameter = 
-                          list(k = 400, method = "Pearson"))
 ubcf_rec <- Recommender(edx_c_mini, method = "UBCF", parameter = 
                           list(method = "Pearson", nn = 10))
+ibcf_rec <- Recommender(edx_c_mini, method = "IBCF", parameter = 
+                          list(k = 400, method = "Pearson"))
+svd_rec <- Recommender(edx_c_mini, method = "SVD", parameter = 
+                         list(k = 20))
 
-rl_predict <- function(rec, newdata){
-  rrm <- recommenderlab::predict(object = rec, newdata = edx_c_subset, type = "ratings") 
-  
-  # Need to convert predicted ratings matrix into data frame form
-  rrdf <- rrm %>% 
-    as("matrix") %>% 
-    as.data.frame() %>%
-    rownames_to_column(var = "userId") %>%
-    remove_rownames() %>%
-    gather(movieId, rating, -userId, na.rm = TRUE) %>%
-    mutate(
-      movieId = as.integer(movieId),
-      userId = as.integer(userId)
-    )
-  
-  newdata %>% select(movieId, userId) %>%
-    left_join(rrdf, by = c("movieId", "userId")) %>%
+# Get all ratings possible for movies, user 
+# pairs that are not in knownRatings with model rec
+rl_predict_all <- function(rec, knownRatings){
+  recommenderlab::predict(object = rec, newdata = knownRatings, type = "ratings") %>% 
+  as("matrix") %>% 
+  as.data.frame() %>%
+  rownames_to_column(var = "userId") %>%
+  remove_rownames() %>%
+  gather(movieId, rating, -userId, na.rm = TRUE) %>%
+  mutate(
+    movieId = as.integer(movieId),
+    userId = as.integer(userId)
+  ) %>%
     left_join(movie_effects_r, by = "movieId") %>%
     left_join(user_effects_r, by = "userId") %>%
-    mutate(rating = rating + mu + m_i + u_j) %>%
-    mutate(rating = if_else(rating > 5, 5, rating)) %>%
-    mutate(rating = if_else(rating < .5, .5, rating)) %>%
+    mutate(rating = bounded(rating + mu + m_i + u_j)) %>%
+    select(movieId, userId, rating)
+}
+
+# Get only ratings of movie, user pairs in newdata
+rl_predict <- function(rec, knownRatings, newdata){
+  newdata %>% select(movieId, userId) %>%
+    left_join(rl_predict_all(rec, knownRatings), by = c("movieId", "userId")) %>%
     pull(rating)
 }
 
-svd_prediction <- rl_predict(svd_rec, validation)
-ibcf_prediction <- rl_predict(ibcf_rec, validation)
-ubcf_prediction <- rl_predict(ubcf_rec, validation)
+ubcf_prediction <- rl_predict(ubcf_rec, edx_c_top_movies, validation)
+ibcf_prediction <- rl_predict(ibcf_rec, edx_c_top_movies, validation)
+svd_prediction <- rl_predict(svd_rec, edx_c_top_movies, validation)
 
 predictions <- data.frame(mufr = mufr_prediction,
                           svd = svd_prediction,
                           ibcf = ibcf_prediction,
-                          ubcf = ubcf_prediction, 
-                          actual = validation$rating)
-
-# Check how predictions compare when they exist
-predictions %>% filter(!is.na(ubcf)) %>% summarize(RMSE(mufr,actual),RMSE(ubcf,actual))
-predictions %>% filter(!is.na(ibcf)) %>% summarize(RMSE(mufr,actual),RMSE(ibcf,actual))
-predictions %>% filter(!is.na(svd)) %>% summarize(RMSE(mufr,actual),RMSE(svd,actual))
+                          ubcf = ubcf_prediction)
 
 # Combine new predictions with our standard model 
 predictions <- predictions %>% mutate_all( ~ if_else(is.na(.), mufr, .))
-svd_RMSE <- RMSE(validation$rating, predictions$svd)
-ibcf_RMSE <- RMSE(validation$rating, predictions$ibcf)
 ubcf_RMSE <- RMSE(validation$rating, predictions$ubcf)
+ibcf_RMSE <- RMSE(validation$rating, predictions$ibcf)
+svd_RMSE <- RMSE(validation$rating, predictions$svd)
+ubcf_RMSE
+ibcf_RMSE
+svd_RMSE
 
 #####################################################################################
 #####################################################################################
@@ -245,20 +259,52 @@ ubcf_RMSE <- RMSE(validation$rating, predictions$ubcf)
 # Saving results to file for later user in report...
 
 results <- data.frame(Name = c("Simple Average", "Movie + User Effects", 
-                               "Regularized Effects (MUFR)", "MUFR + SVD",
-                               "MUFR + IBCF", "MUFR + UBCF"),
+                               "Regularized Effects (MUFR)", "MUFR + UBCF", 
+                               "MUFR + IBCF", "MUFR + SVD"),
                       RMSE = c(c_RMSE, muf_RMSE, mufr_RMSE,
-                               svd_RMSE, ibcf_RMSE, ubcf_RMSE))
-movies <- edx %>% distinct(movieId, title, genres)
-  
-top_recs <- predictions %>% select(-actual) %>%
-  add_column(userId = validation$userId, movieId = validation$movieId) %>%
-  filter(userId %in% 1:100)
+                               ubcf_RMSE, ibcf_RMSE, svd_RMSE))
 
+movies <- edx %>% distinct(movieId, title, genres)
+
+# Need to rerun the models to get recommendations for all movies 
+# in top 1000 for 200 users
+
+# Known Ratings for top 200 users
+edx_c_200 <- edx_c %>% 
+  filter(movieId %in% top_movies & userId %in% top_users[1:200]) %>%
+  select(userId, movieId, rating) %>% as("realRatingMatrix")
+
+models <-  list(UBCF = ubcf_rec, IBCF = ibcf_rec, SVD = svd_rec)
+
+# Get Recommender Lab predicted ratings for all unrated 
+# movies, don't include user effect
+rl_ratings_200 <- lapply(models, function(x){
+  rl_predict_all(x, edx_c_200) %>%
+    left_join(movie_effects_r, by = "movieId") %>%
+    left_join(user_effects_r, by = "userId") %>%
+    mutate(rating = bounded(rating + mu + m_i)) %>%
+    select(userId, movieId, rating)
+}) 
+
+# Get predicted ratings for all unrated movies via MUFR
+mufr_ratings_200 <- bind_rows(ratings_200, .id = "model") %>%
+  distinct(userId, movieId) %>% 
+  left_join(movie_effects_r, by = "movieId") %>%
+  mutate(rating = mu + m_i, model = "MUFR") %>%
+  select(model, userId, movieId, rating)
+  
+all_ratings_200 <- bind_rows(rl_ratings_200, .id = "model") %>%
+  bind_rows(mufr_ratings_200) %>%
+  group_by(model, userId) %>%
+  top_n(10, wt = rating) %>%
+  ungroup()
+
+
+######################
 save(mu, c_prediction, 
      movie_effects, user_effects,
      k, edx_fold_summary, lambda_optim, lambda, tuningData,
      movie_effects_r, user_effects_r,
-     results, movies, top_recs,
+     results, movies, all_ratings_200,
      file = "./data/output.rda"
      )
