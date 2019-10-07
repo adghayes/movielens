@@ -33,7 +33,7 @@ Methods
 
 ### Data Preparation
 
-The 1 million ratings used for this project are a subset of the full 10 million rating [MovieLens dataset](https://grouplens.org/datasets/movielens/10m/). Using the script provided in class, the data was imported from flat files and split into training and test datasets called *edx* and *validation* respectively. Users or movies that occured only in the test set were removed and added back to the training set, to avoid making predictions on net new movies or users.
+The data used is the [MovieLens dataset](https://grouplens.org/datasets/movielens/10m/). Using the script provided in class, the data was imported from flat files and split into training and test datasets called *edx* and *validation* respectively. Users or movies that occured only in the test set were removed and added back to the training set, to avoid making predictions on net new movies or users.
 
 ### Measuring Effectiveness
 
