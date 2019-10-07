@@ -122,7 +122,8 @@ cross_validate_rmse <- function(lambda){
 
 # Calibrate lambda with Nelder-Mead optimization
 lambda_0 <- c(lambda_m = 4.70262, lambda_u = 4.96466)
-lambda_optim <- optim(par = lambda_0, fn = cross_validatet_rmse, control = list(maxit = 25, trace = TRUE))
+lambda_optim <- optim(par = lambda_0, fn = cross_validate_rmse, 
+                      control = list(maxit = 25, trace = TRUE))
 lambda <- lambda_optim$par
 lambda_optim
 
@@ -165,14 +166,11 @@ mufr_RMSE
 #######################################
 #  Appendix: RECOMMENDER LAB (rl)     #
 #######################################
-# https://cran.r-project.org/web/packages/recommenderlab/vignettes/recommenderlab.pdf
-# NOTE: In this section tuning is done not via cross-validation as would be best practice,
-# but on the test set itself. This is more exploratory, and the computation expense
-# was too high to do standard training with tuningGrids and k-folds on my local
 library(recommenderlab)
 n_movies <- 1000
 n_users <- 1000
 
+# Normalized, regularized copy of dataset for easy use
 edx_c <- edx %>% 
   left_join(movie_effects_r, by = "movieId") %>%
   left_join(user_effects_r, by = "userId") %>%
@@ -191,12 +189,14 @@ all_users <- edx_c %>%
 
 top_users = all_movies[1:n_users]
 
-# Matrix of ratings for 1000 most common movies for subset of users
+# Matrix of ratings for 1000 most common movies and
+# 1000 most prolific users, to train recommenderlab models
 edx_c_mini <- edx_c %>%
   filter(userId %in% top_users & movieId %in% top_movies) %>%
   select(userId, movieId, rating) %>% as("realRatingMatrix")
 
-# Matrix of ratings for 1000 most common movies for all users in edx
+# Matrix of ratings for 1000 most common movies for all 
+# users in edx, to predict with recommenderlab models
 edx_c_top_movies <- edx_c %>%
   filter(movieId %in% top_movies) %>%
   select(userId, movieId, rating) %>% as("realRatingMatrix")
@@ -209,8 +209,8 @@ ibcf_rec <- Recommender(edx_c_mini, method = "IBCF", parameter =
 svd_rec <- Recommender(edx_c_mini, method = "SVD", parameter = 
                          list(k = 20))
 
-# Get all ratings possible for movies, user 
-# pairs that are not in knownRatings with model rec
+# Get all ratings possible for movie-user 
+# pairs that are not in knownRatings
 rl_predict_all <- function(rec, knownRatings){
   recommenderlab::predict(object = rec, newdata = knownRatings, type = "ratings") %>% 
   as("matrix") %>% 
@@ -224,14 +224,15 @@ rl_predict_all <- function(rec, knownRatings){
   ) %>%
     left_join(movie_effects_r, by = "movieId") %>%
     left_join(user_effects_r, by = "userId") %>%
-    mutate(rating = bounded(rating + mu + m_i + u_j)) %>%
+    mutate(rating = rating + mu + m_i + u_j) %>%
     select(movieId, userId, rating)
 }
 
-# Get only ratings of movie, user pairs in newdata
+# Get only ratings of movie-user pairs in newdata
 rl_predict <- function(rec, knownRatings, newdata){
   newdata %>% select(movieId, userId) %>%
     left_join(rl_predict_all(rec, knownRatings), by = c("movieId", "userId")) %>%
+    mutate(rating = bounded(rating)) %>%
     pull(rating)
 }
 
@@ -256,7 +257,7 @@ svd_RMSE
 #####################################################################################
 #####################################################################################
 #####################################################################################
-# Saving results to file for later user in report...
+# Compiling results to save to file for later user in report...
 
 results <- data.frame(Name = c("Simple Average", "Movie + User Effects", 
                                "Regularized Effects (MUFR)", "MUFR + UBCF", 
@@ -267,36 +268,38 @@ results <- data.frame(Name = c("Simple Average", "Movie + User Effects",
 movies <- edx %>% distinct(movieId, title, genres)
 
 # Need to rerun the models to get recommendations for all movies 
-# in top 1000 for 200 users
+# in top 1000 for 250 users
 
-# Known Ratings for top 200 users
-edx_c_200 <- edx_c %>% 
-  filter(movieId %in% top_movies & userId %in% top_users[1:200]) %>%
+# Known Ratings for top 250 users
+edx_c_250 <- edx_c %>% 
+  filter(movieId %in% top_movies & userId %in% top_users[1:250]) %>%
   select(userId, movieId, rating) %>% as("realRatingMatrix")
 
 models <-  list(UBCF = ubcf_rec, IBCF = ibcf_rec, SVD = svd_rec)
 
 # Get Recommender Lab predicted ratings for all unrated 
 # movies, don't include user effect
-rl_ratings_200 <- lapply(models, function(x){
-  rl_predict_all(x, edx_c_200) %>%
-    left_join(movie_effects_r, by = "movieId") %>%
-    left_join(user_effects_r, by = "userId") %>%
-    mutate(rating = bounded(rating + mu + m_i)) %>%
-    select(userId, movieId, rating)
+rl_ratings_250 <- lapply(models, function(x){
+  rl_predict_all(x, edx_c_250)
 }) 
 
-# Get predicted ratings for all unrated movies via MUFR
-mufr_ratings_200 <- bind_rows(ratings_200, .id = "model") %>%
+# Get predicted ratings for all unrated movies via MUFR, but 
+# no need to include user effects
+mufr_ratings_250 <- bind_rows(rl_ratings_250, .id = "model") %>%
   distinct(userId, movieId) %>% 
   left_join(movie_effects_r, by = "movieId") %>%
   mutate(rating = mu + m_i, model = "MUFR") %>%
   select(model, userId, movieId, rating)
   
-all_ratings_200 <- bind_rows(rl_ratings_200, .id = "model") %>%
-  bind_rows(mufr_ratings_200) %>%
+# Only take top ten per user/model to reduce size for knitr
+all_ratings_250 <- bind_rows(rl_ratings_250, .id = "model") %>%
+  bind_rows(mufr_ratings_250) %>%
   group_by(model, userId) %>%
-  top_n(10, wt = rating) %>%
+  group_modify(~ {
+    .x %>% 
+      arrange(desc(.x$rating)) %>%
+      head(10L)
+    }) %>%
   ungroup()
 
 
@@ -305,6 +308,6 @@ save(mu, c_prediction,
      movie_effects, user_effects,
      k, edx_fold_summary, lambda_optim, lambda, tuningData,
      movie_effects_r, user_effects_r,
-     results, movies, all_ratings_200,
+     results, movies, all_ratings_250,
      file = "./data/output.rda"
      )
