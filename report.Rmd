@@ -7,10 +7,6 @@ output:
     toc: true
     toc_depth: 3
     number_sections: true
-  github_document:
-    toc: true
-    toc_depth: 3
-    pandoc_args: --webtex
 header-includes:
   - \usepackage{float}
   - \usepackage{booktabs}
