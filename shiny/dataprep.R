@@ -18,8 +18,13 @@ lambdas <- seq(lambda_min, lambda_max, by = lambda_step)
 mu <- mean(edx$rating)
 
 raw_effects <- edx %>%
-  group_by(movieId, title, genres) %>%
-  summarise(effect = mean(rating) - mu, n = n()) %>%
+  group_by(movieId) %>%
+  summarise(
+    effect = mean(rating) - mu, 
+    n = n(),
+    title = first(title),
+    genres = first(genres)
+    ) %>%
   extract(title, c("title","year"), "(.*)\\s\\((\\d{4})\\)")
 
 # Adjusts Effects w/ Regularization
