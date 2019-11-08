@@ -2,29 +2,66 @@ library(tidyverse)
 library(shiny)
 library(shinythemes)
 library(ggvis)
-library(data.table)
 load("./data.rda")
-n_movies <- nrow(raw_effects)
+
+top_ns <- unlist(list(1,
+  seq(5, 50, 5),
+  seq(60, 100, 10),
+  seq(150, 500, 50),
+  seq(600, 1000, 100),
+  seq(1500, 2500, 500)))
+
+# 1-N mapping of movies to genres
+movie_genres <- raw_effects %>%
+  select(movieId, genres) %>%
+  separate_rows(genres, sep = "\\|") %>%
+  rename(genre = genres) %>%
+  mutate(genre = if_else(genre == "(no genres listed)", 
+                         "None Specified", genre))
+
+# List of unique genres used for checkbox selection
+unique_genres <- movie_genres %>%
+  pull(genre) %>% unique()
+
+# Truncate movie titles for display
 raw_effects <- raw_effects %>%
   mutate(title = str_trunc(title, 35, "right"))
 
-ui <- fluidPage(theme = shinytheme("cerulean"),
+ui <- fluidPage(
+  theme = shinytheme("cerulean"),
   titlePanel("MovieLens Regularization Explorer"),
   sidebarLayout(
     position = "right",
     sidebarPanel(
       sliderInput(inputId = "lambda", 
                   label = "Lambda", 
-                  value = 0, 
+                  value = min(rmses_tbl$lambda), 
                   min = min(rmses_tbl$lambda), 
                   max = max(rmses_tbl$lambda),
                   step = lambda_step),
-      sliderInput(inputId = "top_n", 
-                  label = "Top/Bottom Highlights", 
-                  value = 500, 
-                  min = 5, 
-                  max = 500,
-                  step = 5)
+      conditionalPanel(
+        condition = "input.tabs != 'Parameter Tuning'",
+        checkboxInput(inputId = "customize_genres",
+                      label = "Customize Genres Included?"),
+        conditionalPanel(
+          condition = "input.customize_genres == true",
+          checkboxGroupInput(inputId = "selected_genres", 
+                      label = "Genres:", 
+                      choices = unique_genres, 
+                      selected = unique_genres,
+                      inline = TRUE,
+                      width = "100%")
+        )
+      ),
+      conditionalPanel(
+        condition = "input.tabs == 'Effect Plot'",
+        sliderInput(inputId = "top_n", 
+                    label = "Top/Bottom Highlights", 
+                    value = 500, 
+                    min = 0, 
+                    max = max(top_ns),
+                    step = 5)
+      )
     ),
     mainPanel(
       tabsetPanel(id = "tabs",
@@ -36,24 +73,56 @@ ui <- fluidPage(theme = shinytheme("cerulean"),
     )
   ),
   hr(),
-  htmlOutput("description")
+  uiOutput("description")
 )
 
-server <- function(input, output) {
+
+
+server <- function(input, output, session) {
   
+  # Reactive df of regularized effects
   effects <- reactive({
-    f.effects(raw_effects, input$lambda) %>%
+    req(input$selected_genres)
+    # Either all movies, or movies only with selected genre
+    if(input$customize_genres == FALSE){
+      selected_effects <- raw_effects
+    } else {
+      selected_effects <- raw_effects %>%
+        left_join(movie_genres, by = "movieId") %>%
+        filter(genre %in% input$selected_genres) %>%
+        select(-genre) %>%
+        distinct()
+    }
+    
+    # Regularize, Order, and Rank movies
+    f.regularize(selected_effects, input$lambda) %>%
       arrange(desc(effect)) %>%
-      mutate(ranking = row_number(),
-             rev_ranking = as.integer(n_movies + 1 - ranking),
-             Place = if_else(ranking <= input$top_n,
-                           paste("Top ", input$top_n),
-                           if_else(rev_ranking <= input$top_n,
-                                   paste("Bottom ", input$top_n), 
-                                   "Other"))
+      mutate(
+        ranking = row_number(),
+        rev_ranking = as.integer(max(ranking) + 1 - ranking)
       )
   })
   
+  effects_d <- debounce(effects, 1000)
+  
+  # Track our max possible highlights based on data
+  # with max defined as less than a third of all movies
+  max_top_n <- reactive({
+    n_movies <- nrow(effects_d())
+    max(top_ns[top_ns < (n_movies/3)])
+  })
+  
+  # Update slider as max changes
+  observe({
+    cur_top_n <- isolate(input$top_n)
+    updateSliderInput(
+      session, 
+      inputId = "top_n", 
+      max = max_top_n(),
+      value = min(max_top_n(), cur_top_n))
+  })
+  
+  # Define tooltip used when hovering on scatterplot
   movie_tooltip <- function(x) {
     if (is.null(x)) return(NULL)
     if (is.null(x$movieId)) return(NULL)
@@ -68,14 +137,24 @@ server <- function(input, output) {
     )
   }
   
+  # Draw Dynamic Effect Plot
   effects_plot <- reactive({
-    effects %>% 
+    effects_d() %>%
+      mutate(
+        Place = if_else(
+          ranking <= input$top_n,
+          paste("Top ", input$top_n),
+          if_else(
+            rev_ranking <= input$top_n,
+            paste("Bottom ", input$top_n), "Other"))
+      ) %>%
       ggvis(~log10(n), ~effect) %>%
       layer_points(fill = ~Place, size := 50, size.hover := 200, 
                    fillOpacity := .2, fillOpacity.hover := .8,
                    key := ~movieId) %>%
       scale_ordinal("fill", range = c("purple", "gray", "brown")) %>%
       scale_numeric("y", domain = c(-3.1, 1.6)) %>%
+      scale_numeric("x", domain = c(-.2, 4.7)) %>%
       add_axis("x", title = "Number of Ratings (Log. 10 Scale)") %>%
       add_axis("y", title = "Movie Effect") %>%
       add_tooltip(movie_tooltip, "hover") %>%
@@ -85,8 +164,9 @@ server <- function(input, output) {
   
   effects_plot %>% bind_shiny("effects")
   
+  # Top 10 movie table
   output$top_movies <- renderTable(
-    effects() %>%
+    effects_d() %>%
       head(n = 10) %>%
       select(Ranking = ranking, 
              Title = title, 
@@ -94,8 +174,9 @@ server <- function(input, output) {
              `Mean Effect` = effect),
     striped = TRUE)
   
+  # Bottom 10 movie table
   output$bottom_movies <- renderTable(
-    effects() %>%
+    effects_d() %>%
       tail(n = 10) %>%
       arrange(rev_ranking) %>%
       select(Ranking = rev_ranking, 
@@ -104,11 +185,14 @@ server <- function(input, output) {
              `Mean Effect` = effect),
     striped = TRUE)
   
+  # Plot of tuning parameter, lambda, vs. RMSE
   tuning_plot <- reactive({
     rmses_tbl %>% 
-      mutate(highlighted = factor(
-        if_else(round(lambda,2) == input$lambda, "Yes", "No"), 
-        levels = c("No", "Yes"))) %>%
+      mutate(
+        highlighted = factor(
+          if_else(
+            round(lambda,2) == input$lambda, 
+            "Yes", "No"), levels = c("No", "Yes"))) %>%
       arrange(highlighted) %>%
       ggvis(~lambda, ~rmse, size = ~highlighted, shape = ~highlighted) %>%
       layer_points() %>%
@@ -122,70 +206,28 @@ server <- function(input, output) {
   
   tuning_plot %>% bind_shiny("tuning")
   
-  output$description <- reactive({
-    if (input$tabs == "Effect Plot"){
-      paste("<p>The data displayed here is derived from the ",
-            "famous <a href = \"https://grouplens.org/datasets/movielens/",
-            "\">MovieLens dataset</a> of users' movie ratings (10M). Here we ",
-            "observe and play with the average ratings of each movie in ",
-            "the 10M dataset. In the above plot, \"Movie Effect\" is the ",
-            "deviation of a movie's average rating from the overall average",
-            " rating.<br><br>",
-            "<a href = \"https://rafalab.github.io/dsbook/",
-            "large-datasets.html#regularization\"><b>Regularization</b></a> ",
-            "is the process of normalizing group statistics based ",
-            "on sample size. In the case of movie ratings, it means ",
-            "regressing a movie's mean rating back to overal mean rating ",
-            "for small sample sizes. Without doing so, our results indicate ",
-            "that the best movies, by mean movie rating, are movies ",
-            "that have only a handful of five star ratings. This is ",
-            "problematic for estimating the true mean rating for any movie ",
-            "with few ratings. ",
-            "With regularization, each movie's mean is calculated with an added ",
-            "parameter, lambda, in the demoninator, and in this applet you can ",
-            "experiment with different values of lambda. For a more formal ",
-            "summary of the problem and process of predicting movie means ",
-            "check out the associated report on <a href = \"https://github.com/",
-            "adghayes/movielens/blob/master/report.pdf\">my github</a>.<br><br>",
-            "In the plot above, sample size is plotted ",
-            "against adjusted average movie rating. With no adjustment, ",
-            "lambda = 0, many of our \"Top\" movies have small sample ",
-            "sizes. As you increase lambda, you will see the \"Top\"",
-            "movies shift toward the more popular movies.</p>",
-            sep = "")
-    } else if (input$tabs == "Top 10"){
-      paste("<p>Observe how the the Top 10 movies changes as ",
-            "the regularization parameter changes. With no regularization ",
-            "the Top 10 are all fairly obscure movies with very few, ",
-            "albeit positive, reviews. As the regularization parameter increases ",
-            "these movies are displaced by better-known movies recognizable ",
-            "from any top movie list like <a href = \"https://www.imdb.com/",
-            "search/title/?groups=top_250&sort=user_rating\">IMDb's.</a></p>",
-            sep = "")
-    } else if (input$tabs == "Bottom 10"){
-      paste("<p>The Bottom 10 movies have a similar pattern as ",
-            "the Top 10 in that as lambda increases, movies ",
-            "with a few ratings are replaced with more reliably ",
-            "bad movies, as expected. However, unlike in the Top 10",
-            " there are many movies which stay stably in the Bottom 10 ",
-            "even as lambda increases. One hypothesis for why this is the ",
-            "case is that there are no bad movies with incredibly high ",
-            "sample sizes. Good movies are rewatched and re-rated, so the ",
-            "sample size gets very large whereas bad movies a simply watched ",
-            "less. As a result, regularization is less impactful.</p>",
-            sep = "")
-    } else if (input$tabs == "Parameter Tuning"){
-      paste("<p>A common use for rating prediction models is to predict ",
-            "the users' ratings for movies they haven't seen yet. In ",
-            "a simple popularity model, in which we predict users rate ",
-            "movies according to the average rating for that movie, ",
-            "regularization leads to better predictions. After splitting ",
-            "the MovieLens dataset into a 9/10 training set and a 1/10 ",
-            "test set, predictions were made on the training set for ",
-            "various values of lambda, plotted above.</p>",
-            sep = "")
-    } 
+  # Render HTML footer as dynamic UI
+  # component, varies based on tab selection
+  output$description <- renderUI({
+    column(
+      offset = .5, width = 11,
+      fluidRow(
+        if(input$tabs == "Effect Plot"){
+          includeHTML("effect_plot.html")
+        } else if(input$tabs == "Top 10"){
+          includeHTML("top_10.html")
+        } else if(input$tabs == "Bottom 10"){
+          includeHTML("bottom_10.html")
+        } else if(input$tabs == "Parameter Tuning"){
+          includeHTML("parameter_tuning.html")
+        } 
+      )
+    )
   })
+  
+  outputOptions(output, "bottom_movies", suspendWhenHidden = FALSE)
+  outputOptions(output, "top_movies", suspendWhenHidden = FALSE)
+  
 }
 
 shinyApp(ui = ui, server = server)

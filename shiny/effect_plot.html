@@ -1,0 +1,14 @@
+<html> The data used in this applet is  the famous <a href="https://grouplens.org/datasets/movielens/">MovieLens
+    dataset</a> of users' movie ratings. Here we use the 10 million record dataset rather than the full 20 or 27 million record dataset. In the above plot, "Movie Effect" is the deviation of a movie's average rating from the overall average
+rating.<br><br><a href="https://rafalab.github.io/dsbook/large-datasets.html#regularization"><b>Regularization</b></a>
+is the process of normalizing group statistics based on sample size. In the case of movie effects, it means regressing a
+movie's effect back to overall mean effect (by definition, 0) for small sample sizes. Without doing so, our results indicate that
+the best movies, by movie effect, are movies that have only a handful of five star ratings. This is problematic
+for estimating the true movie effect for any movie with few ratings. With regularization, each movie's effect is
+calculated with an added parameter, lambda, in the denominator, and in this applet you can experiment with different
+values of lambda. For a more formal summary of the problem and process of predicting movie means check out the
+associated report on <a href="https://github.com/adghayes/movielens/blob/master/report.pdf">my github</a>.<br><br>Above you can see that with no adjustment, lambda = 0, many
+of our "Top" movies have small sample sizes. As you increase lambda, you will see the "Top" movies shift toward
+the more popular movies.
+
+</html>
