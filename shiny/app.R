@@ -65,7 +65,8 @@ ui <- fluidPage(
     ),
     mainPanel(
       tabsetPanel(id = "tabs",
-        tabPanel("Effect Plot", ggvisOutput("effects")),
+        tabPanel("Effect Plot", ggvisOutput("effects"),
+                 htmlOutput("stats")),
         tabPanel("Top 10", tableOutput("top_movies")),
         tabPanel("Bottom 10", tableOutput("bottom_movies")),
         tabPanel("Parameter Tuning", ggvisOutput("tuning"))
@@ -80,22 +81,27 @@ ui <- fluidPage(
 
 server <- function(input, output, session) {
   
-  # Reactive df of regularized effects
-  effects <- reactive({
+  
+  # Reactive df of raw effects
+  selected_effects <- reactive({
     req(input$selected_genres)
-    # Either all movies, or movies only with selected genre
     if(input$customize_genres == FALSE){
-      selected_effects <- raw_effects
+      raw_effects
     } else {
-      selected_effects <- raw_effects %>%
+      raw_effects %>%
         left_join(movie_genres, by = "movieId") %>%
         filter(genre %in% input$selected_genres) %>%
         select(-genre) %>%
         distinct()
     }
-    
+  })
+  
+  selected_effects_d <- debounce(selected_effects, 1000)
+  
+  # Reactive df of regularized effects
+  effects <- reactive({
     # Regularize, Order, and Rank movies
-    f.regularize(selected_effects, input$lambda) %>%
+    f.regularize(selected_effects_d(), input$lambda) %>%
       arrange(desc(effect)) %>%
       mutate(
         ranking = row_number(),
@@ -103,12 +109,12 @@ server <- function(input, output, session) {
       )
   })
   
-  effects_d <- debounce(effects, 1000)
+  
   
   # Track our max possible highlights based on data
   # with max defined as less than a third of all movies
   max_top_n <- reactive({
-    n_movies <- nrow(effects_d())
+    n_movies <- nrow(effects())
     max(top_ns[top_ns < (n_movies/3)])
   })
   
@@ -139,7 +145,7 @@ server <- function(input, output, session) {
   
   # Draw Dynamic Effect Plot
   effects_plot <- reactive({
-    effects_d() %>%
+    effects() %>%
       mutate(
         Place = if_else(
           ranking <= input$top_n,
@@ -164,9 +170,19 @@ server <- function(input, output, session) {
   
   effects_plot %>% bind_shiny("effects")
   
+  output$stats <- renderText({
+    count <- nrow(selected_effects_d())
+    average <- selected_effects_d() %>% 
+      summarise(mu_r = mu + sum(effect*n)/sum(n)) %>%
+      pull(mu_r)
+    paste("<i>Number of Movies</i> = ", format(count, big.mark = ","),
+          " | <i>Average Rating</i> = ", format(average, digits = 3),
+          sep = "")
+  })
+  
   # Top 10 movie table
   output$top_movies <- renderTable(
-    effects_d() %>%
+    effects() %>%
       head(n = 10) %>%
       select(Ranking = ranking, 
              Title = title, 
@@ -176,7 +192,7 @@ server <- function(input, output, session) {
   
   # Bottom 10 movie table
   output$bottom_movies <- renderTable(
-    effects_d() %>%
+    effects() %>%
       tail(n = 10) %>%
       arrange(rev_ranking) %>%
       select(Ranking = rev_ranking, 
