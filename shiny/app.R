@@ -25,7 +25,13 @@ unique_genres <- movie_genres %>%
 
 # Truncate movie titles for display
 raw_effects <- raw_effects %>%
-  mutate(title = str_trunc(title, 35, "right"))
+  mutate(title = str_remove(title, "\\s+\\(.*\\)")) %>% 
+  mutate(title = str_replace(title, "^(.*),\\s(The|A|An|Le|Les|La|Las|El|Lose|Das|Da|De)$", "\\2 \\1"))
+
+raw_effects %>% 
+  extract(title, c("name", "article"), regex = "(.*),\\s([a-zA-Z]*$)", remove = FALSE) %>% 
+  filter((article %in% c("A", "The", "Le", "Les", "An", NA, "La", "Das", "El", "Los", "Da", "De"))) %>% 
+  print(n = 40)
 
 ui <- fluidPage(
   theme = shinytheme("cerulean"),
@@ -109,8 +115,6 @@ server <- function(input, output, session) {
       )
   })
   
-  
-  
   # Track our max possible highlights based on data
   # with max defined as less than a third of all movies
   max_top_n <- reactive({
@@ -158,7 +162,7 @@ server <- function(input, output, session) {
       layer_points(fill = ~Place, size := 50, size.hover := 200, 
                    fillOpacity := .2, fillOpacity.hover := .8,
                    key := ~movieId) %>%
-      scale_ordinal("fill", range = c("purple", "gray", "brown")) %>%
+      scale_ordinal("fill", range = c("#73A839", "#868e96", "#C71C22")) %>%
       scale_numeric("y", domain = c(-3.1, 1.6)) %>%
       scale_numeric("x", domain = c(-.2, 4.7)) %>%
       add_axis("x", title = "Number of Ratings (Log. 10 Scale)") %>%
@@ -216,7 +220,7 @@ server <- function(input, output, session) {
       scale_ordinal("shape", range = c("dot","cross")) %>%
       add_axis("y", title = "Root Mean Squared Error (RMSE)", title_offset = 70) %>%
       add_axis("x", title = "Lambda") %>%
-      hide_legend(scales = c("size","shape")) %>%
+      ggvis::hide_legend(scales = c("size","shape")) %>%
       set_options(resizable = FALSE, width = "auto")
   })
   
