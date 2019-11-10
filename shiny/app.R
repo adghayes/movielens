@@ -4,15 +4,15 @@ library(shinythemes)
 library(ggvis)
 load("./data.rda")
 
-top_ns <- unlist(list(1,
+# Possible max values for Top/Bottom Shown Slider
+top_ns <- unlist(list(
   seq(5, 50, 5),
   seq(60, 100, 10),
   seq(150, 500, 50),
-  seq(600, 1000, 100),
-  seq(1500, 2500, 500)))
+  seq(600, 1000, 100)))
 
 # 1-N mapping of movies to genres
-movie_genres <- raw_effects %>%
+movies_genres <- raw_effects %>%
   select(movieId, genres) %>%
   separate_rows(genres, sep = "\\|") %>%
   rename(genre = genres) %>%
@@ -20,19 +20,10 @@ movie_genres <- raw_effects %>%
                          "None Specified", genre))
 
 # List of unique genres used for checkbox selection
-unique_genres <- movie_genres %>%
+unique_genres <- movies_genres %>%
   pull(genre) %>% unique()
 
-# Truncate movie titles for display
-raw_effects <- raw_effects %>%
-  mutate(title = str_remove(title, "\\s+\\(.*\\)")) %>% 
-  mutate(title = str_replace(title, "^(.*),\\s(The|A|An|Le|Les|La|Las|El|Lose|Das|Da|De)$", "\\2 \\1"))
-
-raw_effects %>% 
-  extract(title, c("name", "article"), regex = "(.*),\\s([a-zA-Z]*$)", remove = FALSE) %>% 
-  filter((article %in% c("A", "The", "Le", "Les", "An", NA, "La", "Das", "El", "Los", "Da", "De"))) %>% 
-  print(n = 40)
-
+# Client definition
 ui <- fluidPage(
   theme = shinytheme("cerulean"),
   titlePanel("MovieLens Regularization Explorer"),
@@ -62,9 +53,9 @@ ui <- fluidPage(
       conditionalPanel(
         condition = "input.tabs == 'Effect Plot'",
         sliderInput(inputId = "top_n", 
-                    label = "Top/Bottom Highlights", 
-                    value = 500, 
-                    min = 0, 
+                    label = "Top/Bottom Shown", 
+                    value = 250, 
+                    min = 5, 
                     max = max(top_ns),
                     step = 5)
       )
@@ -84,10 +75,9 @@ ui <- fluidPage(
 )
 
 
-
+# Server definition
 server <- function(input, output, session) {
-  
-  
+
   # Reactive df of raw effects
   selected_effects <- reactive({
     req(input$selected_genres)
@@ -95,18 +85,19 @@ server <- function(input, output, session) {
       raw_effects
     } else {
       raw_effects %>%
-        left_join(movie_genres, by = "movieId") %>%
+        left_join(movies_genres, by = "movieId") %>%
         filter(genre %in% input$selected_genres) %>%
         select(-genre) %>%
         distinct()
     }
   })
   
+  # Debounce change in selected effects for cleaner
+  # if slower UX
   selected_effects_d <- debounce(selected_effects, 1000)
   
   # Reactive df of regularized effects
   effects <- reactive({
-    # Regularize, Order, and Rank movies
     f.regularize(selected_effects_d(), input$lambda) %>%
       arrange(desc(effect)) %>%
       mutate(
@@ -119,7 +110,11 @@ server <- function(input, output, session) {
   # with max defined as less than a third of all movies
   max_top_n <- reactive({
     n_movies <- nrow(effects())
-    max(top_ns[top_ns < (n_movies/3)])
+    if(n_movies < 10){
+      min(top_ns)
+    } else {
+      max(top_ns[top_ns <= (n_movies/2)])
+    }
   })
   
   # Update slider as max changes
@@ -140,7 +135,6 @@ server <- function(input, output, session) {
     # Pick out the movie with this ID
     const_effects <- isolate(effects())
     movie <- const_effects[const_effects$movieId == x$movieId, ]
-    
     paste0("<b>", movie$title, "</b><br>",
            "Num. Ratings: " , format(movie$n,big.mark = ","), "<br>",
            "Movie Effect: ", format(movie$effect, digits = 2)
@@ -158,14 +152,16 @@ server <- function(input, output, session) {
             rev_ranking <= input$top_n,
             paste("Bottom ", input$top_n), "Other"))
       ) %>%
-      ggvis(~log10(n), ~effect) %>%
-      layer_points(fill = ~Place, size := 50, size.hover := 200, 
-                   fillOpacity := .2, fillOpacity.hover := .8,
+      filter(Ranking != "Other") %>%
+      ggvis(~n, ~effect) %>%
+      layer_points(fill = ~Ranking, size := 50, size.hover := 200, 
+                   fillOpacity := .4, fillOpacity.hover := .8,
                    key := ~movieId) %>%
-      scale_ordinal("fill", range = c("#73A839", "#868e96", "#C71C22")) %>%
+      scale_ordinal("fill", range = c("#73A839", "#C71C22")) %>%
+      add_axis("x", subdivide = 5) %>%
       scale_numeric("y", domain = c(-3.1, 1.6)) %>%
-      scale_numeric("x", domain = c(-.2, 4.7)) %>%
-      add_axis("x", title = "Number of Ratings (Log. 10 Scale)") %>%
+      scale_numeric("x", trans = "sqrt", expand = .001) %>%
+      add_axis("x", title = "Number of Ratings") %>%
       add_axis("y", title = "Movie Effect") %>%
       add_tooltip(movie_tooltip, "hover") %>%
       set_options(resizable = FALSE, width = "auto")
