@@ -17,3 +17,4 @@ The files in the repository include:
  - report.Rmd - reproducible report in R Markdown format
  - report.pdf - output of report.Rmd and the best way to read results
  - refresh.R - shortcut script to rerun entire pipeline: dataset creation, analysis, and report generation
+ - shiny - contains shiny app source app.R, source data for app data.rda, and html files used in the shiny app

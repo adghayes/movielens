@@ -151,7 +151,7 @@ server <- function(input, output, session) {
   effects_plot <- reactive({
     effects() %>%
       mutate(
-        Place = if_else(
+        Ranking = if_else(
           ranking <= input$top_n,
           paste("Top ", input$top_n),
           if_else(
