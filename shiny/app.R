@@ -1,4 +1,5 @@
-library(tidyverse)
+library(dplyr)
+library(tidyr)
 library(shiny)
 library(shinythemes)
 library(ggvis)
